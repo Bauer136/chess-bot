@@ -36,7 +36,7 @@ class FrameDiffMoveDetector:
         self,
         stable_thresh: float = 2.0,
         disturbed_thresh: float = 8.0,
-        stable_frames: int = 10,
+        stable_frames: int = 15,
     ):
         if stable_thresh >= disturbed_thresh:
             raise ValueError("stable_thresh must be < disturbed_thresh (need hysteresis)")

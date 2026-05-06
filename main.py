@@ -26,6 +26,7 @@ import numpy as np
 
 from calibrate import click_corners, save_calibration
 from move_detector import FrameDiffMoveDetector, MoveEvent, State
+from segmentation import iter_square_names, segment_board
 
 SENTINEL = None
 CALIBRATION_PATH = Path(__file__).parent / "calibration.json"
@@ -82,6 +83,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip writing move JPEGs to disk.",
     )
+    parser.add_argument(
+        "--save-squares",
+        action="store_true",
+        help="Also save 64 segmented square crops per detected move.",
+    )
     return parser.parse_args()
 
 
@@ -131,13 +137,29 @@ def preprocess(frame, matrix, board_size: int, blur_ksize: int):
     return out
 
 
-def handle_move(event: MoveEvent, moves_dir: Optional[Path]) -> None:
+def handle_move(
+    event: MoveEvent,
+    moves_dir: Optional[Path],
+    save_squares: bool,
+) -> None:
     print(f"[move {event.index:03d}] detected")
+
+    # Stage 4: slice the after-frame into 64 square crops. The flat
+    # (64, h, w, c) reshape is the batch shape Stage 5 will feed to the CNN.
+    grid = segment_board(event.after)
+    squares_batch = grid.reshape(64, *grid.shape[2:])
+
     if moves_dir is None:
         return
     moves_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(moves_dir / f"move_{event.index:03d}_before.jpg"), event.before)
     cv2.imwrite(str(moves_dir / f"move_{event.index:03d}_after.jpg"), event.after)
+
+    if save_squares:
+        sq_dir = moves_dir / f"move_{event.index:03d}_squares"
+        sq_dir.mkdir(parents=True, exist_ok=True)
+        for crop, name in zip(squares_batch, iter_square_names()):
+            cv2.imwrite(str(sq_dir / f"{name}.jpg"), crop)
 
 
 def consumer(
@@ -145,6 +167,7 @@ def consumer(
     stop: threading.Event,
     detector: FrameDiffMoveDetector,
     moves_dir: Optional[Path],
+    save_squares: bool,
 ) -> None:
     while not stop.is_set():
         item = frame_q.get()
@@ -152,7 +175,7 @@ def consumer(
             break
         event = detector.update(item)
         if event is not None:
-            handle_move(event, moves_dir)
+            handle_move(event, moves_dir, save_squares)
 
 
 def draw_overlay(view, detector: FrameDiffMoveDetector) -> None:
@@ -180,7 +203,9 @@ def main() -> None:
     frame_q: queue.Queue = queue.Queue(maxsize=args.queue_size)
     stop = threading.Event()
     worker = threading.Thread(
-        target=consumer, args=(frame_q, stop, detector, moves_dir), daemon=True
+        target=consumer,
+        args=(frame_q, stop, detector, moves_dir, args.save_squares),
+        daemon=True,
     )
     worker.start()
 
