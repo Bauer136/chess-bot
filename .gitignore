@@ -1,0 +1,18 @@
+# venv
+venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Runtime artifacts
+moves/
+*.log
+
+# Local calibration (machine/camera-specific)
+calibration.json
