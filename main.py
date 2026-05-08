@@ -25,6 +25,7 @@ import cv2
 import numpy as np
 
 from calibrate import click_corners, save_calibration
+from classifier import predict as classify_squares
 from move_detector import FrameDiffMoveDetector, MoveEvent, State
 from segmentation import iter_square_names, segment_board
 
@@ -144,10 +145,16 @@ def handle_move(
 ) -> None:
     print(f"[move {event.index:03d}] detected")
 
-    # Stage 4: slice the after-frame into 64 square crops. The flat
-    # (64, h, w, c) reshape is the batch shape Stage 5 will feed to the CNN.
+    # Stage 4: slice the after-frame into 64 square crops.
     grid = segment_board(event.after)
     squares_batch = grid.reshape(64, *grid.shape[2:])
+
+    # Stage 5 (stub): classify each square. Real CNN replaces this later.
+    labels = classify_squares(squares_batch)
+    rows = ["".join(labels[r * 8:(r + 1) * 8]) for r in range(8)]
+    print(f"[move {event.index:03d}] predicted board:")
+    for row in rows:
+        print(f"  {row}")
 
     if moves_dir is None:
         return
