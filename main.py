@@ -24,6 +24,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from board_state import BoardTracker
 from calibrate import click_corners, save_calibration
 from classifier import predict as classify_squares
 from move_detector import FrameDiffMoveDetector, MoveEvent, State
@@ -142,6 +143,7 @@ def handle_move(
     event: MoveEvent,
     moves_dir: Optional[Path],
     save_squares: bool,
+    tracker: BoardTracker,
 ) -> None:
     print(f"[move {event.index:03d}] detected")
 
@@ -155,6 +157,13 @@ def handle_move(
     print(f"[move {event.index:03d}] predicted board:")
     for row in rows:
         print(f"  {row}")
+
+    # Stage 7: reconcile predicted position with the tracked Board.
+    move = tracker.update(labels)
+    if move is None:
+        print(f"[move {event.index:03d}] no legal move matches predicted position")
+    else:
+        print(f"[move {event.index:03d}] {move.uci()}  fen: {tracker.board.fen()}")
 
     if moves_dir is None:
         return
@@ -175,6 +184,7 @@ def consumer(
     detector: FrameDiffMoveDetector,
     moves_dir: Optional[Path],
     save_squares: bool,
+    tracker: BoardTracker,
 ) -> None:
     while not stop.is_set():
         item = frame_q.get()
@@ -182,7 +192,7 @@ def consumer(
             break
         event = detector.update(item)
         if event is not None:
-            handle_move(event, moves_dir, save_squares)
+            handle_move(event, moves_dir, save_squares, tracker)
 
 
 def draw_overlay(view, detector: FrameDiffMoveDetector) -> None:
@@ -205,13 +215,14 @@ def main() -> None:
         disturbed_thresh=args.disturbed_thresh,
         stable_frames=args.stable_frames,
     )
+    tracker = BoardTracker()
     moves_dir: Optional[Path] = None if args.no_save_moves else Path(args.moves_dir)
 
     frame_q: queue.Queue = queue.Queue(maxsize=args.queue_size)
     stop = threading.Event()
     worker = threading.Thread(
         target=consumer,
-        args=(frame_q, stop, detector, moves_dir, args.save_squares),
+        args=(frame_q, stop, detector, moves_dir, args.save_squares, tracker),
         daemon=True,
     )
     worker.start()
@@ -250,12 +261,14 @@ def main() -> None:
                         save_calibration(pts, board_size, (frame.shape[1], frame.shape[0]))
                         matrix = build_transform(pts, board_size)
                         detector.reset()
-                        print("[calibrate] new calibration saved, detector reset")
+                        tracker.reset()
+                        print("[calibrate] new calibration saved, detector and board reset")
                 if key == ord("r"):
                     matrix = None
                     cv2.destroyWindow("chess-bot board")
                     detector.reset()
-                    print("[calibrate] reset to raw camera view, detector reset")
+                    tracker.reset()
+                    print("[calibrate] reset to raw camera view, detector and board reset")
     finally:
         stop.set()
         frame_q.put(SENTINEL)
