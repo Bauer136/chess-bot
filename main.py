@@ -27,6 +27,7 @@ import numpy as np
 from board_state import BoardTracker
 from calibrate import click_corners, save_calibration
 from classifier import predict as classify_squares
+from engine import EngineWrapper
 from move_detector import FrameDiffMoveDetector, MoveEvent, State
 from segmentation import iter_square_names, segment_board
 
@@ -90,6 +91,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also save 64 segmented square crops per detected move.",
     )
+    parser.add_argument(
+        "--stockfish-path",
+        default="stockfish",
+        help="Path to Stockfish binary (default: 'stockfish' on PATH).",
+    )
+    parser.add_argument(
+        "--think-time",
+        type=float,
+        default=0.5,
+        help="Seconds Stockfish gets to choose each reply.",
+    )
     return parser.parse_args()
 
 
@@ -144,6 +156,7 @@ def handle_move(
     moves_dir: Optional[Path],
     save_squares: bool,
     tracker: BoardTracker,
+    engine: EngineWrapper,
 ) -> None:
     print(f"[move {event.index:03d}] detected")
 
@@ -165,6 +178,14 @@ def handle_move(
     else:
         print(f"[move {event.index:03d}] {move.uci()}  fen: {tracker.board.fen()}")
 
+        # Stage 8: ask Stockfish for the reply.
+        if tracker.board.is_game_over():
+            print(f"[move {event.index:03d}] game over: {tracker.board.outcome()}")
+        else:
+            reply = engine.best_move(tracker.board)
+            if reply is not None:
+                print(f"[move {event.index:03d}] stockfish suggests: {reply.uci()}")
+
     if moves_dir is None:
         return
     moves_dir.mkdir(parents=True, exist_ok=True)
@@ -185,6 +206,7 @@ def consumer(
     moves_dir: Optional[Path],
     save_squares: bool,
     tracker: BoardTracker,
+    engine: EngineWrapper,
 ) -> None:
     while not stop.is_set():
         item = frame_q.get()
@@ -192,7 +214,7 @@ def consumer(
             break
         event = detector.update(item)
         if event is not None:
-            handle_move(event, moves_dir, save_squares, tracker)
+            handle_move(event, moves_dir, save_squares, tracker, engine)
 
 
 def draw_overlay(view, detector: FrameDiffMoveDetector) -> None:
@@ -216,13 +238,15 @@ def main() -> None:
         stable_frames=args.stable_frames,
     )
     tracker = BoardTracker()
+    engine = EngineWrapper(path=args.stockfish_path, think_time=args.think_time)
+    engine.open()
     moves_dir: Optional[Path] = None if args.no_save_moves else Path(args.moves_dir)
 
     frame_q: queue.Queue = queue.Queue(maxsize=args.queue_size)
     stop = threading.Event()
     worker = threading.Thread(
         target=consumer,
-        args=(frame_q, stop, detector, moves_dir, args.save_squares, tracker),
+        args=(frame_q, stop, detector, moves_dir, args.save_squares, tracker, engine),
         daemon=True,
     )
     worker.start()
@@ -273,6 +297,7 @@ def main() -> None:
         stop.set()
         frame_q.put(SENTINEL)
         worker.join(timeout=2.0)
+        engine.close()
         cap.release()
         if not args.no_display:
             cv2.destroyAllWindows()
