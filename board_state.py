@@ -59,6 +59,16 @@ def _piece_map_from_labels(labels: List[str]) -> Dict[int, chess.Piece]:
     return pmap
 
 
+def board_to_labels(board: chess.Board) -> List[str]:
+    """Read a chess.Board as 64 labels in a8 -> h1 order (inverse of the input
+    the classifier and tracker consume)."""
+    labels: List[str] = []
+    for sq_name in iter_square_names():
+        piece = board.piece_at(chess.parse_square(sq_name))
+        labels.append(piece.symbol() if piece else EMPTY)
+    return labels
+
+
 class BoardTracker:
     """Maintains a chess.Board across detected moves."""
 

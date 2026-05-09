@@ -21,10 +21,11 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+import chess
 import cv2
 import numpy as np
 
-from board_state import BoardTracker
+from board_state import BoardTracker, board_to_labels
 from calibrate import click_corners, save_calibration
 from classifier import predict as classify_squares
 from engine import EngineWrapper
@@ -102,7 +103,44 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="Seconds Stockfish gets to choose each reply.",
     )
+    parser.add_argument(
+        "--demo-moves",
+        default=None,
+        help=(
+            "Comma-separated UCI moves (e.g. 'e2e4,e7e5,g1f3'). When set, each "
+            "detection event consumes the next move from this list instead of "
+            "calling the classifier. Useful for testing Stages 7-10 before the "
+            "real CNN exists."
+        ),
+    )
     return parser.parse_args()
+
+
+class DemoSource:
+    """Stand-in for the classifier: replays a scripted UCI move sequence.
+
+    Each call to `next_labels()` advances a shadow board by one move and
+    returns the resulting 64-label snapshot in a8 -> h1 order — the same
+    shape the real classifier produces. Returns None when the queue is
+    exhausted or the next move is illegal.
+    """
+
+    def __init__(self, ucis):
+        self.ucis = list(ucis)
+        self.idx = 0
+        self.shadow = chess.Board()
+
+    def next_labels(self):
+        if self.idx >= len(self.ucis):
+            return None
+        uci = self.ucis[self.idx]
+        try:
+            self.shadow.push_uci(uci)
+        except (ValueError, chess.InvalidMoveError, chess.IllegalMoveError) as e:
+            print(f"[demo] move {self.idx} ({uci!r}) rejected: {e}")
+            return None
+        self.idx += 1
+        return board_to_labels(self.shadow)
 
 
 def build_transform(corners, board_size: int):
@@ -157,6 +195,7 @@ def handle_move(
     save_squares: bool,
     tracker: BoardTracker,
     engine: EngineWrapper,
+    demo: Optional[DemoSource],
 ) -> None:
     print(f"[move {event.index:03d}] detected")
 
@@ -164,27 +203,35 @@ def handle_move(
     grid = segment_board(event.after)
     squares_batch = grid.reshape(64, *grid.shape[2:])
 
-    # Stage 5 (stub): classify each square. Real CNN replaces this later.
-    labels = classify_squares(squares_batch)
-    rows = ["".join(labels[r * 8:(r + 1) * 8]) for r in range(8)]
-    print(f"[move {event.index:03d}] predicted board:")
-    for row in rows:
-        print(f"  {row}")
-
-    # Stage 7: reconcile predicted position with the tracked Board.
-    move = tracker.update(labels)
-    if move is None:
-        print(f"[move {event.index:03d}] no legal move matches predicted position")
+    # Stage 5: get per-square labels — from the demo queue if active, else
+    # from the (currently stub) classifier.
+    if demo is not None:
+        labels = demo.next_labels()
+        if labels is None:
+            print(f"[move {event.index:03d}] demo queue exhausted")
     else:
-        print(f"[move {event.index:03d}] {move.uci()}  fen: {tracker.board.fen()}")
+        labels = classify_squares(squares_batch)
 
-        # Stage 8: ask Stockfish for the reply.
-        if tracker.board.is_game_over():
-            print(f"[move {event.index:03d}] game over: {tracker.board.outcome()}")
+    if labels is not None:
+        rows = ["".join(labels[r * 8:(r + 1) * 8]) for r in range(8)]
+        print(f"[move {event.index:03d}] predicted board:")
+        for row in rows:
+            print(f"  {row}")
+
+        # Stage 7: reconcile predicted position with the tracked Board.
+        move = tracker.update(labels)
+        if move is None:
+            print(f"[move {event.index:03d}] no legal move matches predicted position")
         else:
-            reply = engine.best_move(tracker.board)
-            if reply is not None:
-                print(f"[move {event.index:03d}] stockfish suggests: {reply.uci()}")
+            print(f"[move {event.index:03d}] {move.uci()}  fen: {tracker.board.fen()}")
+
+            # Stage 8: ask Stockfish for the reply.
+            if tracker.board.is_game_over():
+                print(f"[move {event.index:03d}] game over: {tracker.board.outcome()}")
+            else:
+                reply = engine.best_move(tracker.board)
+                if reply is not None:
+                    print(f"[move {event.index:03d}] stockfish suggests: {reply.uci()}")
 
     if moves_dir is None:
         return
@@ -207,6 +254,7 @@ def consumer(
     save_squares: bool,
     tracker: BoardTracker,
     engine: EngineWrapper,
+    demo: Optional[DemoSource],
 ) -> None:
     while not stop.is_set():
         item = frame_q.get()
@@ -214,7 +262,7 @@ def consumer(
             break
         event = detector.update(item)
         if event is not None:
-            handle_move(event, moves_dir, save_squares, tracker, engine)
+            handle_move(event, moves_dir, save_squares, tracker, engine, demo)
 
 
 def draw_overlay(view, detector: FrameDiffMoveDetector) -> None:
@@ -240,13 +288,18 @@ def main() -> None:
     tracker = BoardTracker()
     engine = EngineWrapper(path=args.stockfish_path, think_time=args.think_time)
     engine.open()
+    demo: Optional[DemoSource] = None
+    if args.demo_moves:
+        ucis = [m.strip() for m in args.demo_moves.split(",") if m.strip()]
+        demo = DemoSource(ucis)
+        print(f"[demo] queued {len(ucis)} moves: {ucis}")
     moves_dir: Optional[Path] = None if args.no_save_moves else Path(args.moves_dir)
 
     frame_q: queue.Queue = queue.Queue(maxsize=args.queue_size)
     stop = threading.Event()
     worker = threading.Thread(
         target=consumer,
-        args=(frame_q, stop, detector, moves_dir, args.save_squares, tracker, engine),
+        args=(frame_q, stop, detector, moves_dir, args.save_squares, tracker, engine, demo),
         daemon=True,
     )
     worker.start()
