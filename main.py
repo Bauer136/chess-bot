@@ -1,16 +1,18 @@
 """Chess-bot pipeline entry point.
 
-Stages 1-3 (v1): capture frames, apply the saved perspective warp + Gaussian
-blur, push rectified frames onto a queue. A consumer thread runs the
-frame-difference move detector; each detected move emits before/after JPEGs
-and a console line. C3D will replace the detector later as a drop-in.
+Capture frames, optionally warp them via the saved perspective matrix and
+blur them, push rectified frames onto a queue. A consumer thread runs the
+frame-difference move detector, classifier, board-state tracker, and
+Stockfish bridge. Each detected move logs a UCI move + FEN + engine reply.
 
-Run calibrate.py first to produce calibration.json. Without it, frames pass
-through unrectified.
+Calibration is performed from inside this loop: press 'c' on the debug
+window to click the four board corners on the current frame. The
+calibration is saved to calibration.json and auto-loaded on subsequent
+runs. calibrate.py is now a library; do not run it directly.
 
 Hotkeys (display window focused):
     q = quit
-    c = recalibrate corners
+    c = (re)calibrate corners using the most recent frame
     r = reset to raw camera view (drop the in-memory warp matrix)
 """
 
@@ -155,7 +157,7 @@ def build_transform(corners, board_size: int):
 def load_calibration():
     """Return (transform_matrix, board_size) or (None, None) if uncalibrated."""
     if not CALIBRATION_PATH.exists():
-        print(f"[warn] {CALIBRATION_PATH.name} not found — run calibrate.py first.")
+        print(f"[warn] {CALIBRATION_PATH.name} not found — press 'c' on the live window to calibrate.")
         return None, None
     payload = json.loads(CALIBRATION_PATH.read_text())
     size = int(payload["board_size"])

@@ -1,15 +1,19 @@
-"""One-time perspective calibration.
+"""Perspective calibration helpers, invoked from main.py via the 'c' hotkey.
 
-Grabs a single frame from the configured source, lets you click the four
-board corners in TL -> TR -> BR -> BL order, and writes the result to
-calibration.json next to this script. main.py loads that file at startup.
+main.py owns the camera and the live capture loop. When the user presses
+'c' on the debug window, main.py hands the current frame to `click_corners`
+here, then writes the result with `save_calibration`. This module is
+library-only — running `python calibrate.py` directly is no longer the
+calibration path.
 
-Keys: r = reset clicks, Enter/Space = confirm, q = abort.
+UI keys inside the calibration window:
+    left-click  pick the next corner (TL -> TR -> BR -> BL)
+    r           reset clicks
+    Enter/Space confirm
+    q           abort
 """
 
-import argparse
 import json
-import sys
 from pathlib import Path
 
 import cv2
@@ -18,38 +22,12 @@ CORNER_LABELS = ["top-left", "top-right", "bottom-right", "bottom-left"]
 OUT_PATH = Path(__file__).parent / "calibration.json"
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--source", default="0", help="Camera index or video path.")
-    p.add_argument("--width", type=int, default=1280)
-    p.add_argument("--height", type=int, default=720)
-    p.add_argument(
-        "--board-size",
-        type=int,
-        default=512,
-        help="Side length (px) of the rectified square board image.",
-    )
-    return p.parse_args()
-
-
-def grab_frame(source: str, width: int, height: int):
-    src: int | str = int(source) if source.isdigit() else source
-    cap = cv2.VideoCapture(src)
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open source: {source}")
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-    # Discard a few frames so auto-exposure settles.
-    for _ in range(5):
-        cap.read()
-    ok, frame = cap.read()
-    cap.release()
-    if not ok:
-        raise RuntimeError("Could not read a frame from source.")
-    return frame
-
-
 def click_corners(frame):
+    """Open an interactive window over `frame` and return the 4 clicked corners.
+
+    Returns the corners in TL -> TR -> BR -> BL order, or None if the user
+    aborted with 'q'.
+    """
     points: list[tuple[int, int]] = []
     window = "calibrate"
 
@@ -101,18 +79,3 @@ def save_calibration(corners, board_size: int, frame_size) -> Path:
     }
     OUT_PATH.write_text(json.dumps(payload, indent=2))
     return OUT_PATH
-
-
-def main() -> None:
-    args = parse_args()
-    frame = grab_frame(args.source, args.width, args.height)
-    pts = click_corners(frame)
-    if pts is None:
-        print("calibration aborted")
-        sys.exit(1)
-    out = save_calibration(pts, args.board_size, (frame.shape[1], frame.shape[0]))
-    print(f"wrote {out}")
-
-
-if __name__ == "__main__":
-    main()
