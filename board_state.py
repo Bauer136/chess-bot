@@ -43,7 +43,7 @@ def labels_to_placement(labels: List[str]) -> str:
             if empty:
                 out += str(empty)
                 empty = 0
-            out += ch
+            out += chhigh-level
         if empty:
             out += str(empty)
         rows.append(out)
