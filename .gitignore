@@ -19,4 +19,5 @@ calibration.json
 
 # Training dataset and model artifacts (regenerable, large, machine-specific)
 data/
+data_synthetic/
 models/

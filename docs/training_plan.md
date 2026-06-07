@@ -181,18 +181,85 @@ Per-crop accuracy can look great while position-accuracy is terrible
    low-confidence or wrong ones. This is the cheapest way to get from
    v0 to v1.
 
-## Order of operations (when we do start coding)
+## Order of operations
 
-1. Scaffold `data/` folder structure + a tiny `tools/label_helper.py`
-   that lists crops needing classification and lets you drop each into
-   a folder with one keypress.
-2. Run `main.py --save-squares` on 20-30 captured positions → ~1500
-   crops to label.
-3. Label them. Live with the boredom.
-4. Write `train.py`, run phase 1 + phase 2.
-5. Drop the stub from `classifier.py`, point `_get_model` at the saved
-   `.keras` file.
-6. Run the live pipeline end-to-end on a real game. Watch
-   `[move NNN] no legal move matches predicted position` go from
-   100% to 5% to 0%.
-7. (Optional) Synthetic pretrain pass if real-only doesn't get there.
+The scaffolding is implemented. What's left is data capture, labelling,
+and the actual training runs.
+
+### Implemented
+- `data/`, `data_synthetic/`, `models/` directories + `tools/label_helper.py`
+- `synthetic.py` — python-chess SVG + cairosvg crop generator
+- `train.py` — phase-1 / phase-2 MobileNetV2 transfer learning with
+  `--init-from` for warm-starting from a saved checkpoint
+- `classifier.py` — lazy-loads `models/classifier.keras` when present,
+  falls back to the stub otherwise
+
+### Runbook
+
+1. **Top up the synthetic dataset** (optional — the existing 3.6k crops
+   is enough for a warm-start):
+   ```
+   python synthetic.py --positions 500 --seed 1
+   ```
+   ~5 min wall time, ~32k crops appended to `data_synthetic/`.
+
+2. **Synthetic pretrain:**
+   ```
+   python train.py --data-dir data_synthetic \
+       --output models/classifier_synth.keras \
+       --epochs-head 10 --epochs-finetune 10
+   ```
+   `--epochs-head 3 --epochs-finetune 5` is usually plenty — synthetic is
+   trivially separable (val_acc hit 1.0 after a single epoch on the smoke
+   run). The point is to nudge the backbone toward chess-glyph features,
+   not to converge on synthetic. Wall time on CPU: ~10 min on 3.6k crops,
+   ~6–7 hours if you topped up to 32k crops with the defaults above.
+
+3. **Capture real positions:**
+   ```
+   python main.py --save-squares
+   ```
+   Press 'c' to calibrate if `calibration.json` is stale. Set up 20–30
+   diverse positions on the real board (opening, middle-game, endgame,
+   scattered tests). Each detected move writes 64 crops to
+   `moves/move_NNN_squares/`. Target ~1500 crops total.
+
+4. **Label the crops:**
+   ```
+   python tools/label_helper.py moves/move_001_squares/
+   ```
+   Repeat for each capture folder. One keystroke per crop (space = empty,
+   p/n/b/r/q/k = black, hold shift for white).
+
+5. **Warm-start fine-tune on real data:**
+   ```
+   python train.py --data-dir data \
+       --init-from models/classifier_synth.keras \
+       --output models/classifier.keras \
+       --epochs-head 0 --epochs-finetune 15
+   ```
+   `--epochs-head 0` reuses the head trained on synthetic; phase 2
+   unfreezes the top 50 backbone layers at 10× lower LR so the
+   ImageNet + synthetic features adapt to real-camera appearance. Watch
+   `val_loss`. Ctrl+C is safe in phase 2 — `ModelCheckpoint` already
+   saved the best-by-val-loss snapshot to `--output`.
+
+6. **Inspect `models/eval.json`.** Top-1 accuracy is the wrong metric.
+   Per-class accuracy on K/Q/k/q is what matters: kings/queens appear
+   once per side, so a single misclass breaks FEN reconstruction in
+   Stage 7. If any per-class accuracy is below 0.99, capture more crops
+   for that class and rerun step 5 with `--init-from models/classifier.keras`.
+
+7. **Run the live pipeline:**
+   ```
+   python main.py
+   ```
+   `classifier.py` auto-picks up `models/classifier.keras`. Watch the
+   terminal for `[move NNN] no legal move matches predicted position` —
+   that's the signal that the predicted board isn't a single legal move
+   away from the tracked board, almost always a classifier error.
+
+8. **(Optional) Active learning loop.** Capture more positions, label
+   only the crops the model gets wrong, retrain with
+   `--init-from models/classifier.keras` to nudge weights toward the
+   camera-specific edge cases.
